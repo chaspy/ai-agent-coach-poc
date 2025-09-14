@@ -1,0 +1,27 @@
+{
+  "name": "agent-poc-workspace",
+  "private": true,
+  "workspaces": [
+    "agent-poc",
+    "agent-poc-web",
+    "agent-poc-lg",
+    "agent-poc-oa"
+  ],
+  "scripts": {
+    "dev:agent": "npm run dev --workspace=agent-poc",
+    "dev:agent-web": "npm run dev --workspace=agent-poc-web",
+    "dev:agent-lg": "npm run dev --workspace=agent-poc-lg",
+    "dev:agent-oa": "npm run dev --workspace=agent-poc-oa",
+    "dev:agents": "npm run dev:agent",
+    "dev:agents:all": "concurrently -n mastra,langgraph,openai -c cyan,magenta,green \"npm:dev:agent\" \"npm:dev:agent-lg\" \"npm:dev:agent-oa\"",
+    "dev:agents:web": "concurrently -n mastra,langgraph,openai,web -c cyan,magenta,green,blue \"npm:dev:agent\" \"npm:dev:agent-lg\" \"npm:dev:agent-oa\" \"npm:dev:agent-web\"",
+    "build:agent": "npm run build --workspace=agent-poc",
+    "build:agent-web": "npm run build --workspace=agent-poc-web",
+    "build:agent-lg": "npm run build --workspace=agent-poc-lg",
+    "build:agent-oa": "npm run build --workspace=agent-poc-oa",
+    "agents:setup": "npm install && npm install --workspace=agent-poc && npm install --workspace=agent-poc-lg && npm install --workspace=agent-poc-oa && npm install --workspace=agent-poc-web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

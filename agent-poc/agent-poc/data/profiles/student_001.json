@@ -1,0 +1,11 @@
+{
+  "id": "student_001",
+  "name": "田中太郎",
+  "role": "student",
+  "age": 20,
+  "grade": "大学2年生",
+  "subject": "数学",
+  "goals": "数学の基礎を固めて、応用問題にも取り組めるようになりたい",
+  "strengths": "計算は得意",
+  "weaknesses": "文章問題が苦手"
+}

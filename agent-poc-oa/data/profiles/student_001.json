@@ -1,0 +1,18 @@
+{
+  "id": "student_001",
+  "role": "student",
+  "tone": "friendly",
+  "goals": ["英検2級合格", "英会話の流暢さ向上"],
+  "level": "B1",
+  "strengths": ["語彙は多め"],
+  "weaknesses": ["文法の正確さ"],
+  "preferences": {
+    "length": "short",
+    "formality": "polite",
+    "emoji": false,
+    "language": "ja"
+  },
+  "schedule": "平日 19:00-21:00 JST",
+  "notes": ["試験は10月中旬予定"]
+}
+

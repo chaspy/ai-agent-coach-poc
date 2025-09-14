@@ -1,0 +1,3 @@
+export OPENAI_API_KEY="sk-..."
+export AGENT_POC_OA_PORT=4122
+
