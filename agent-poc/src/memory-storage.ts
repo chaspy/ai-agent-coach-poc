@@ -164,6 +164,35 @@ export function expireMemory(userId: string, memoryId: string): void {
   console.log(`[MemoryStorage] 🗑️ 期限切れマーク: memoryId=${memoryId}`);
 }
 
+// メモリーの削除
+export function deleteMemory(userId: string, memoryId: string): boolean {
+  const memories = loadMemories(userId);
+  const memoryIndex = memories.findIndex(m => m.id === memoryId);
+
+  if (memoryIndex === -1) {
+    console.warn(`[MemoryStorage] ⚠️ Memory not found for deletion: ${memoryId}`);
+    return false;
+  }
+
+  // 該当メモリーを除外
+  memories.splice(memoryIndex, 1);
+
+  // 全メモリーを再保存
+  const filePath = getMemoryFilePath(userId);
+  if (memories.length > 0) {
+    const content = memories.map(m => JSON.stringify(m)).join('\n') + '\n';
+    fs.writeFileSync(filePath, content, 'utf-8');
+  } else {
+    // メモリーが空になった場合はファイルを削除
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+  }
+
+  console.log(`[MemoryStorage] 🗑️ 削除完了: memoryId=${memoryId}`);
+  return true;
+}
+
 // 古いメモリーのクリーンアップ（30日以上前の低関連度メモリー）
 export function cleanupOldMemories(userId: string, daysOld: number = 30): number {
   const memories = loadMemories(userId);

@@ -4,7 +4,8 @@ import { CONFIG } from './config';
 import { logger } from './logger';
 import { replyAgent } from './agent';
 import { readProfile, writeProfile, readRecentHistory, writeHistory, ensureDataDirs } from './data';
-import { searchMemories, getMemoryStats } from './memory-storage';
+import { searchMemories, getMemoryStats, deleteMemory } from './memory-storage';
+import { analyzeStudyPatterns, generatePraiseVariations, generateStudySuggestions } from './memory-analyzer';
 import { thinkingLogStore, ThinkingLogger } from './thinking-log';
 // 🚨 CRITICAL: AI SDK v5ブロッカー対応 (2025-09-05)
 // ストリーミング機能でUnsupportedModelVersionError発生
@@ -12,7 +13,7 @@ import { thinkingLogStore, ThinkingLogger } from './thinking-log';
 // 解決: ai@4.0.7ダウングレード（3エンジン統一）
 import { streamText, generateObject, generateText } from 'ai';
 import { openai } from '@ai-sdk/openai';
-import type { AskInput } from './types';
+import type { AskInput, CoachPromptInput, CoachPromptResponse, CoachPrompt, CoachMessageType } from './types';
 import { TaskPlanSchema, AnswerEvaluationSchema } from './structured-schemas';
 
 ensureDataDirs();
@@ -533,7 +534,15 @@ app.post('/agent/tools/ingest', (req, res) => {
 app.get('/agent/thinking/current', (req, res) => {
   try {
     const currentThinkingLogs = thinkingLogStore.getCurrentThinkingLogs();
-    res.json({ currentThinkingLogs });
+    logger.info({ logsCount: currentThinkingLogs.length }, 'Current thinking logs requested');
+    res.json({
+      currentThinkingLogs,
+      debug: {
+        count: currentThinkingLogs.length,
+        currentMessageId: thinkingLogStore.getCurrentMessageId(),
+        steps: currentThinkingLogs.map(log => log.steps.length)
+      }
+    });
   } catch (error) {
     logger.error({ err: error }, 'Failed to fetch current thinking logs');
     res.status(500).json({ error: 'Failed to fetch current thinking logs' });
@@ -575,7 +584,7 @@ app.get('/agent/thinking/:messageId', (req, res) => {
 app.get('/agent/memories/:userId', (req, res) => {
   const { userId } = req.params;
   const { limit = '20', type } = req.query;
-  
+
   try {
     const memories = searchMemories({
       userId,
@@ -583,9 +592,9 @@ app.get('/agent/memories/:userId', (req, res) => {
       limit: Number(limit),
       notExpired: true,
     });
-    
+
     const stats = getMemoryStats(userId);
-    
+
     res.json({
       memories,
       stats,
@@ -593,6 +602,218 @@ app.get('/agent/memories/:userId', (req, res) => {
   } catch (error) {
     logger.error({ err: error }, 'Failed to fetch memories');
     res.status(500).json({ error: 'Failed to fetch memories' });
+  }
+});
+
+// メモリー削除エンドポイント
+app.delete('/agent/memories/:userId/:memoryId', (req, res) => {
+  const { userId, memoryId } = req.params;
+
+  try {
+    const success = deleteMemory(userId, memoryId);
+
+    if (!success) {
+      return res.status(404).json({ error: 'Memory not found' });
+    }
+
+    logger.info({ userId, memoryId }, 'Memory deleted successfully');
+    res.json({ success: true, message: 'Memory deleted successfully' });
+  } catch (error) {
+    logger.error({ err: error }, 'Failed to delete memory');
+    res.status(500).json({ error: 'Failed to delete memory' });
+  }
+});
+
+// コーチ声掛けメッセージ生成エンドポイント
+app.post('/agent/coach-prompt', async (req, res) => {
+  const { threadId, studentId, coachId, messageType } = req.body as CoachPromptInput;
+
+  if (!threadId || !studentId || !coachId) {
+    return res.status(400).json({ error: 'threadId, studentId, coachId は必須です' });
+  }
+
+  try {
+    logger.info({ threadId, studentId, coachId }, 'コーチ声掛けメッセージ生成開始');
+
+    // 思考ログセッション開始
+    const messageId = `coach_prompt_${Date.now()}`;
+    const sessionId = `session_${Date.now()}`;
+    const thinkingLog = thinkingLogStore.startThinking(sessionId, threadId, messageId, coachId);
+    const thinkingLogger = new ThinkingLogger(messageId);
+
+    thinkingLogger.info('コーチ声掛け生成開始', '生徒の学習状況を分析して適切な声掛けを生成します');
+
+    // 生徒のメモリーを取得
+    thinkingLogger.debug('メモリー取得', `生徒ID: ${studentId} の学習記録を取得中`);
+    const memories = searchMemories({
+      userId: studentId,
+      limit: 50,
+      notExpired: true,
+    });
+    thinkingLogger.info('メモリー取得完了', `${memories.length}件の学習記録を取得`);
+
+    // 学習パターンを分析
+    thinkingLogger.debug('パターン分析開始', '連続学習日数、学習時間、タスク進捗を計算中');
+    const pattern = await analyzeStudyPatterns(memories);
+    thinkingLogger.success('学習パターン分析完了', `連続${pattern.consecutiveDays}日、総学習${Math.round(pattern.totalStudyHours)}時間`);
+    logger.debug({ pattern }, '学習パターン分析完了');
+
+    // 褒めメッセージのバリエーションを生成
+    const praiseMessages = generatePraiseVariations(pattern);
+    const studySuggestions = generateStudySuggestions(pattern);
+
+    // コーチのプロフィールを取得
+    const coachProfile = readProfile(coachId);
+    const studentProfile = readProfile(studentId);
+
+    // 会話履歴を取得（最新5件）
+    const recentHistory = readRecentHistory(threadId, 5);
+    const historyContext = recentHistory.length > 0
+      ? recentHistory.map(h => `[${h.role}] ${h.text}`).join('\n')
+      : '';
+
+    // 3つの異なるアプローチでメッセージを生成
+    thinkingLogger.info('メッセージ生成開始', '3つの異なるアプローチで声掛けメッセージを生成します');
+    const suggestions: CoachPrompt[] = [];
+
+    // 1. 学習提案メッセージ
+    thinkingLogger.debug('学習提案生成', 'TOEIC対策に特化した今日の学習内容を提案');
+    const taskSuggestionPrompt = `
+【役割】あなたは${coachProfile?.name || 'コーチ'}です。
+【生徒情報】${studentProfile?.name || '生徒'}さん
+目標: ${studentProfile?.goals?.join(', ') || 'なし'}
+弱点: ${studentProfile?.weaknesses?.join(', ') || 'なし'}
+
+【最近の会話】
+${historyContext}
+
+【学習状況】
+- 連続学習日数: ${pattern.consecutiveDays}日
+- 総学習時間: ${Math.round(pattern.totalStudyHours)}時間
+- 最近の学習科目: ${pattern.recentSubjects.join(', ') || 'なし'}
+
+【指示】コーチから声掛けするメッセージです。まず自然な挨拶から始めて、生徒の調子を聞いてから、今日の学習提案につなげてください。
+
+【制約】
+- 150-200文字程度
+- 必ず「こんにちは」「今日の調子はどうですか？」などの自然な挨拶から始める
+- 生徒の状態を気遣ってから、TOEIC対策の学習提案を行う
+- 質問を含める（例：「今日はどの時間帯に学習予定ですか？」）
+- 優しく励ます口調
+- 絵文字は使わない`;
+
+    const { text: taskMessage } = await generateText({
+      model: openai(CONFIG.openaiModel) as any,
+      prompt: taskSuggestionPrompt,
+      temperature: 0.7,
+    });
+
+    suggestions.push({
+      id: `suggest_${Date.now()}`,
+      type: 'daily_suggestion' as CoachMessageType,
+      message: taskMessage,
+      confidence: 0.85,
+      reasoning: '学習パターンに基づいた今日の学習提案',
+      thinkingLogId: messageId,
+    } as CoachPrompt & { thinkingLogId?: string });
+
+    // 2. 進捗レビューメッセージ
+    thinkingLogger.debug('進捗レビュー生成', '試験日までの学習計画と進捗確認');
+    const progressPrompt = `
+【役割】あなたは${coachProfile?.name || 'コーチ'}です。
+【生徒情報】${studentProfile?.name || '生徒'}さん
+目標: TOEIC700点（9/30試験）
+現在: 580点（リーディング得意、リスニング苦手）
+
+【最近の会話】
+${historyContext}
+
+【進捗状況】
+- タスク完了率: ${pattern.totalTasks > 0 ? Math.round((pattern.completedTasks / pattern.totalTasks) * 100) : 0}%
+- 克服した課題: ${pattern.challengesOvercome.join(', ') || 'なし'}
+
+【指示】コーチから声掛けするメッセージです。まず挨拶と生徒の近況を聞いてから、TOEIC試験に向けた進捗確認につなげてください。
+
+【制約】
+- 150-200文字程度
+- 「お疲れ様です」「最近どうですか？」など自然な挨拶から始める
+- 生徒の最近の状況を聞いてから、進捗確認に移る
+- 「リスニングの進捗はどうですか？」など具体的な質問を含める
+- 絵文字は使わない`;
+
+    const { text: progressMessage } = await generateText({
+      model: openai(CONFIG.openaiModel) as any,
+      prompt: progressPrompt,
+      temperature: 0.7,
+    });
+
+    suggestions.push({
+      id: `progress_${Date.now()}`,
+      type: 'progress_review' as CoachMessageType,
+      message: progressMessage,
+      confidence: 0.80,
+      reasoning: '進捗状況の確認と次のステップの提案',
+      thinkingLogId: messageId,
+    } as CoachPrompt & { thinkingLogId?: string });
+
+    // 3. モチベーションメッセージ
+    thinkingLogger.debug('モチベーション生成', '580点→700点達成への自信を高めるメッセージ');
+    const motivationPrompt = `
+【役割】あなたは${coachProfile?.name || 'コーチ'}です。
+【生徒情報】${studentProfile?.name || '生徒'}さん
+目標: TOEIC580点→700点（120点UP）
+
+【最近の会話】
+${historyContext}
+
+【褒めポイント】
+- 1日2時間の学習時間を確保している
+- 明確な目標設定ができている
+${praiseMessages.slice(0, 1).join('\n')}
+
+【指示】コーチから声掛けするメッセージです。まず自然な挨拶から始めて、生徒の様子を聞いてから、応援やモチベーションアップのメッセージにつなげてください。
+
+【制約】
+- 150-200文字程度
+- 「こんにちは」「今日はどんな感じですか？」など自然な挨拶から始める
+- 生徒の様子を聞いてから、励ましのメッセージに移る
+- 「最近、手応えを感じることはありましたか？」など感想を聞く質問を含める
+- 前向きで温かい口調
+- 絵文字は使わない`;
+
+    const { text: motivationMessage } = await generateText({
+      model: openai(CONFIG.openaiModel) as any,
+      prompt: motivationPrompt,
+      temperature: 0.8,
+    });
+
+    suggestions.push({
+      id: `motivate_${Date.now()}`,
+      type: 'motivation_boost' as CoachMessageType,
+      message: motivationMessage,
+      confidence: 0.90,
+      reasoning: '学習成果を褒めてモチベーション向上',
+      thinkingLogId: messageId,
+    } as CoachPrompt & { thinkingLogId?: string });
+
+    thinkingLogger.success('メッセージ生成完了', '3つの声掛けメッセージを生成しました');
+    // 思考ログを完了状態にしない（フロントエンドで表示できるように維持）
+    // フロントエンドからの取得後、一定時間後に自動クリア
+    setTimeout(() => {
+      thinkingLogStore.completeThinking(messageId);
+    }, 10000); // 10秒後に完了状態にする
+
+    const response: CoachPromptResponse = {
+      suggestions,
+      thinkingLogId: messageId,
+    } as CoachPromptResponse & { thinkingLogId?: string };
+
+    logger.info({ suggestionsCount: suggestions.length }, 'コーチ声掛けメッセージ生成完了');
+    res.json(response);
+
+  } catch (error) {
+    logger.error({ err: error }, 'コーチ声掛けメッセージ生成失敗');
+    res.status(500).json({ error: 'メッセージ生成に失敗しました' });
   }
 });
 

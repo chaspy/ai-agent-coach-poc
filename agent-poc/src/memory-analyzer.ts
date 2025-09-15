@@ -500,3 +500,216 @@ function extractKeywords(text: string): string[] {
     .filter(word => word.length > 1 && !stopWords.includes(word))
     .slice(0, 10);
 }
+
+// 学習パターン分析機能（コーチ声掛け機能用）
+import type { StudyPattern } from './types';
+
+export async function analyzeStudyPatterns(memories: Memory[]): Promise<StudyPattern> {
+  const now = new Date();
+  const pattern: StudyPattern = {
+    consecutiveDays: 0,
+    totalStudyHours: 0,
+    completedTasks: 0,
+    totalTasks: 0,
+    recentSubjects: [],
+    challengesOvercome: [],
+    currentMood: undefined,
+    commitmentStatus: {
+      pending: 0,
+      completed: 0,
+      overdue: 0
+    }
+  };
+
+  // 学習進捗メモリーの分析
+  const progressMemories = memories.filter(m => m.type === 'learning_progress');
+  const uniqueDates = new Set<string>();
+  const subjects = new Map<string, number>();
+
+  progressMemories.forEach(mem => {
+    const content = mem.content as LearningProgressMemory;
+    if (content.date) {
+      uniqueDates.add(content.date);
+    }
+    if (content.timeSpent) {
+      pattern.totalStudyHours += content.timeSpent / 60;
+    }
+    if (content.subject) {
+      subjects.set(content.subject, (subjects.get(content.subject) || 0) + 1);
+    }
+  });
+
+  // 連続学習日数の計算
+  const sortedDates = Array.from(uniqueDates).sort().reverse();
+  if (sortedDates.length > 0) {
+    pattern.lastStudyDate = sortedDates[0];
+    let consecutive = 1;
+    for (let i = 1; i < sortedDates.length; i++) {
+      const prevDate = new Date(sortedDates[i - 1]);
+      const currDate = new Date(sortedDates[i]);
+      const dayDiff = Math.floor((prevDate.getTime() - currDate.getTime()) / (1000 * 60 * 60 * 24));
+      if (dayDiff === 1) {
+        consecutive++;
+      } else {
+        break;
+      }
+    }
+    pattern.consecutiveDays = consecutive;
+  }
+
+  // 最近の学習科目
+  pattern.recentSubjects = Array.from(subjects.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([subject]) => subject);
+
+  // 課題の克服状況
+  const challengeMemories = memories.filter(m => m.type === 'learning_challenge');
+  challengeMemories.forEach(mem => {
+    const content = mem.content as LearningChallengeMemory;
+    if (content.resolved) {
+      pattern.challengesOvercome.push(content.description);
+    }
+  });
+
+  // コミットメント状況
+  const commitmentMemories = memories.filter(m => m.type === 'commitment');
+  commitmentMemories.forEach(mem => {
+    const content = mem.content as CommitmentMemory;
+    pattern.totalTasks++;
+    if (content.completed) {
+      pattern.completedTasks++;
+      pattern.commitmentStatus.completed++;
+    } else if (content.deadline && new Date(content.deadline) < now) {
+      pattern.commitmentStatus.overdue++;
+    } else {
+      pattern.commitmentStatus.pending++;
+    }
+  });
+
+  // 現在の感情状態（最新のものを取得）
+  const emotionalMemories = memories
+    .filter(m => m.type === 'emotional_state')
+    .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+
+  if (emotionalMemories.length > 0) {
+    const content = emotionalMemories[0].content as EmotionalStateMemory;
+    pattern.currentMood = content.emotion;
+  }
+
+  return pattern;
+}
+
+// 褒めメッセージのバリエーション生成
+export function generatePraiseVariations(pattern: StudyPattern): string[] {
+  const variations: string[] = [];
+
+  // 連続学習日数に対する褒め
+  if (pattern.consecutiveDays >= 7) {
+    variations.push(
+      `${pattern.consecutiveDays}日連続で学習を続けていますね！素晴らしい継続力です！`,
+      `もう${pattern.consecutiveDays}日も連続で頑張っているんですね。その努力は必ず実を結びますよ。`,
+      `${pattern.consecutiveDays}日間の連続学習、本当に感心します。この調子で続けていきましょう！`
+    );
+  } else if (pattern.consecutiveDays >= 3) {
+    variations.push(
+      `${pattern.consecutiveDays}日連続での学習、いい調子ですね！`,
+      `${pattern.consecutiveDays}日間も続けて学習されていて、とても頑張っていますね。`,
+      `連続${pattern.consecutiveDays}日の学習、素晴らしいスタートです！`
+    );
+  }
+
+  // タスク完了率に対する褒め
+  if (pattern.totalTasks > 0) {
+    const completionRate = (pattern.completedTasks / pattern.totalTasks) * 100;
+    if (completionRate >= 80) {
+      variations.push(
+        `タスクの${Math.round(completionRate)}%を完了させていて、素晴らしい達成率です！`,
+        `ほとんどのタスクを完了させていますね。計画的な学習ができています！`,
+        `${pattern.completedTasks}個のタスクを完了！目標達成に向けて着実に進んでいます。`
+      );
+    } else if (completionRate >= 50) {
+      variations.push(
+        `半分以上のタスクを完了させていて、いいペースです！`,
+        `${pattern.completedTasks}個のタスクを完了させました。着実に前進していますね。`
+      );
+    }
+  }
+
+  // 課題克服に対する褒め
+  if (pattern.challengesOvercome.length > 0) {
+    const challenge = pattern.challengesOvercome[0];
+    variations.push(
+      `以前苦手だった「${challenge}」を克服できましたね！大きな成長です。`,
+      `「${challenge}」の課題を乗り越えられて、本当によく頑張りました！`,
+      `苦手を克服する姿勢が素晴らしいです。特に「${challenge}」の改善は見事でした！`
+    );
+  }
+
+  // 学習時間に対する褒め
+  if (pattern.totalStudyHours >= 10) {
+    variations.push(
+      `合計${Math.round(pattern.totalStudyHours)}時間の学習時間、素晴らしい努力です！`,
+      `${Math.round(pattern.totalStudyHours)}時間も学習に取り組んでいて、本当に頑張っていますね。`,
+      `これまでに${Math.round(pattern.totalStudyHours)}時間の学習、その積み重ねが力になっています！`
+    );
+  }
+
+  return variations;
+}
+
+// 学習提案メッセージの生成
+export function generateStudySuggestions(pattern: StudyPattern): string[] {
+  const suggestions: string[] = [];
+  const now = new Date();
+
+  // 最後の学習日からの経過日数
+  if (pattern.lastStudyDate) {
+    const lastDate = new Date(pattern.lastStudyDate);
+    const daysSince = Math.floor((now.getTime() - lastDate.getTime()) / (1000 * 60 * 60 * 24));
+
+    if (daysSince === 0) {
+      suggestions.push(
+        `今日も学習お疲れ様でした！明日も一緒に頑張りましょう。`,
+        `本日の学習、素晴らしかったです。明日はどんなことを学びたいですか？`
+      );
+    } else if (daysSince === 1) {
+      suggestions.push(
+        `昨日の学習から1日経ちました。今日も少しだけでも学習してみませんか？`,
+        `昨日学んだことを復習するいい機会です。10分だけでも取り組んでみましょう！`
+      );
+    } else if (daysSince >= 3) {
+      suggestions.push(
+        `${daysSince}日ぶりですね！無理せず、今日は軽めの復習から始めてみませんか？`,
+        `お久しぶりです！まずは前回の内容を思い出すところから始めましょう。`
+      );
+    }
+  }
+
+  // 未完了のコミットメントがある場合
+  if (pattern.commitmentStatus.pending > 0) {
+    suggestions.push(
+      `${pattern.commitmentStatus.pending}個の未完了タスクがあります。今日は1つでも進めてみましょう！`,
+      `約束したタスクが${pattern.commitmentStatus.pending}個残っています。一緒に取り組みましょうか？`
+    );
+  }
+
+  // 期限切れのタスクがある場合
+  if (pattern.commitmentStatus.overdue > 0) {
+    suggestions.push(
+      `期限を過ぎたタスクが${pattern.commitmentStatus.overdue}個あります。優先順位を決めて取り組みましょう。`,
+      `遅れているタスクがありますが、大丈夫です。今から始めれば挽回できます！`
+    );
+  }
+
+  // 最近の学習科目に基づく提案
+  if (pattern.recentSubjects.length > 0) {
+    const subject = pattern.recentSubjects[0];
+    suggestions.push(
+      `最近よく学習している${subject}を今日も続けてみませんか？`,
+      `${subject}の学習が順調ですね。今日はより応用的な内容に挑戦してみましょう！`
+    );
+  }
+
+  return suggestions;
+}
