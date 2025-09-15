@@ -145,6 +145,23 @@ type Profile = {
   guardrails?: string[];
 };
 
+// コーチ声掛け機能の型定義
+type CoachMessageType =
+  | 'daily_suggestion'
+  | 'progress_review'
+  | 'motivation_boost'
+  | 'celebration'
+  | 'gentle_reminder'
+  | 'challenge_support';
+
+type CoachPrompt = {
+  id: string;
+  type: CoachMessageType;
+  message: string;
+  confidence: number;
+  reasoning: string;
+};
+
 const defaultThread = 'thread_demo';
 
 export function App() {
@@ -195,7 +212,14 @@ export function App() {
   
   // Step 5: 構造化データ関連の状態
   const [structuredData, setStructuredData] = useState<Map<string, StructuredAnalysis>>(new Map());
-  
+
+  // コーチ声掛け機能の状態
+  const [coachPrompts, setCoachPrompts] = useState<CoachPrompt[]>([]);
+  const [showPromptSelector, setShowPromptSelector] = useState(false);
+  const [selectedPromptIndex, setSelectedPromptIndex] = useState<number | null>(null);
+  const [editedPrompt, setEditedPrompt] = useState<string>('');
+  const [loadingPrompts, setLoadingPrompts] = useState(false);
+
   // currentPlanの変化を監視
   useEffect(() => {
     console.log('🔄 currentPlan changed:', currentPlan);
@@ -336,14 +360,49 @@ export function App() {
     }
   };
 
+  const deleteMemoryItem = async (memoryId: string) => {
+    if (!confirm('このメモリーを削除してもよろしいですか？')) {
+      return;
+    }
+
+    try {
+      const base = engine === 'mastra' ? '/agent' : engine === 'langgraph' ? '/agent-lg' : '/agent-oa';
+      const response = await fetch(
+        `${base}/memories/${studentId}/${memoryId}`,
+        {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error('Failed to delete memory');
+      }
+
+      // メモリーリストから削除
+      setMemories(prev => prev.filter(m => m.id !== memoryId));
+
+      // 統計情報を再取得
+      fetchMemories(studentId);
+    } catch (err) {
+      console.error('Failed to delete memory:', err);
+      setError('メモリーの削除に失敗しました');
+    }
+  };
+
   const fetchThinkingLog = async (messageId: string) => {
     try {
       const base = engine === 'mastra' ? '/agent' : engine === 'langgraph' ? '/agent-lg' : '/agent-oa';
-      const res = await fetch(`${base}/thinking/${messageId}`);
+      // バックエンドのポートは3000
+      const backendUrl = `http://localhost:3000${base}/thinking/${messageId}`;
+      console.log('🧠 Fetching thinking log from:', backendUrl);
+      const res = await fetch(backendUrl);
       if (res.ok) {
         const thinkingLog = await res.json();
         setThinkingLogs(prev => new Map(prev).set(messageId, thinkingLog));
         return thinkingLog;
+      } else {
+        console.error('Failed to fetch thinking log:', res.status, res.statusText);
       }
     } catch (err) {
       console.error('Failed to fetch thinking log:', err);
@@ -354,20 +413,27 @@ export function App() {
   const fetchCurrentThinking = async () => {
     try {
       const base = engine === 'mastra' ? '/agent' : engine === 'langgraph' ? '/agent-lg' : '/agent-oa';
-      console.log('🧠 Fetching current thinking from:', `${base}/thinking/current`, { threadId, engine });
-      const res = await fetch(`${base}/thinking/current`);
+      const backendUrl = `http://localhost:3000${base}/thinking/current`;
+      console.log('🧠 Fetching current thinking from:', backendUrl, { threadId, engine });
+      const res = await fetch(backendUrl);
       console.log('🧠 Thinking response status:', res.status);
       if (res.ok) {
         const data = await res.json();
         console.log('🧠 Thinking data received:', data);
+        console.log('🧠 Debug info:', data.debug);
         const currentLogs = data.currentThinkingLogs || [];
         console.log('🧠 Current logs count:', currentLogs.length);
         if (currentLogs.length > 0) {
           // 現在のスレッドに関連する思考ログを探す
+          console.log('🧠 Looking for threadId:', threadId);
+          console.log('🧠 Available logs threadIds:', currentLogs.map((log: any) => log.threadId));
           const relevantLog = currentLogs.find((log: ThinkingLog) => log.threadId === threadId);
           console.log('🧠 Relevant log found:', relevantLog ? 'yes' : 'no', relevantLog);
-          console.log('🧠 Setting currentThinking to:', relevantLog || null);
-          setCurrentThinking(relevantLog || null);
+
+          // もし一致するものがない場合は最初のログを使用（声掛け生成の場合）
+          const logToUse = relevantLog || currentLogs[0];
+          console.log('🧠 Setting currentThinking to:', logToUse);
+          setCurrentThinking(logToUse);
         } else {
           console.log('🧠 No current thinking logs');
           setCurrentThinking(null);
@@ -506,24 +572,27 @@ export function App() {
     }
   }, [studentId, showMemories]);
 
-  // 思考ログのポーリング（loading中またはstreaming中）
+  // 思考ログのポーリング（loading中、streaming中、またはloadingPrompts中）
   useEffect(() => {
     let interval: NodeJS.Timeout;
-    // ローディング中またはストリーミング中（Mastraエンジンのみ）は1秒ごとに思考状況をチェック
-    if ((loading || streaming) && engine === 'mastra') {
-      console.log('🧠 Starting thinking log polling due to:', { loading, streaming, engine });
+    // ローディング中、ストリーミング中、または声掛け生成中（Mastraエンジンのみ）は0.5秒ごとに思考状況をチェック
+    if ((loading || streaming || loadingPrompts) && engine === 'mastra') {
+      console.log('🧠 Starting thinking log polling due to:', { loading, streaming, loadingPrompts, engine });
+      // 即座に一度取得
+      fetchCurrentThinking();
+      // その後定期的に取得
       interval = setInterval(() => {
         fetchCurrentThinking();
-      }, 1000);
+      }, 500); // 0.5秒間隔でポーリング
     }
-    
+
     return () => {
       if (interval) {
         console.log('🧠 Stopping thinking log polling');
         clearInterval(interval);
       }
     };
-  }, [loading, streaming, threadId, engine]);
+  }, [loading, streaming, loadingPrompts, threadId, engine]);
 
   // 自動スクロール機能
   useEffect(() => {
@@ -1068,17 +1137,132 @@ export function App() {
     e.preventDefault();
     const messageToSend = coachMessage; // 送信前にメッセージを保存
     console.log('🚀 Coach Submit:', { enableStreaming, engine, message: messageToSend });
-    
+
     // 🚀 即座にメッセージフィールドをクリア（UX改善）
     setCoachMessage('');
     console.log('🧹 Immediate clear: Coach message field cleared on click');
-    
+
     if (enableStreaming && (engine === 'mastra' || engine === 'langgraph' || engine === 'openai')) {
       console.log('✅ Using streaming mode');
       sendMessageStreaming('coach', messageToSend);
     } else {
       console.log('📝 Using normal mode');
       sendMessage('coach', messageToSend);
+    }
+  };
+
+  // コーチから声掛け機能
+  const handleCoachPrompt = async () => {
+    setLoadingPrompts(true);
+    setError('');
+    setCurrentThinking(null); // 古い思考ログをクリア
+
+    try {
+      const response = await fetch(`http://localhost:${engine === 'mastra' ? '3000' : engine === 'langgraph' ? '3001' : '3002'}/agent/coach-prompt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          threadId,
+          studentId,
+          coachId,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to generate prompts: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+
+      // 思考ログIDがあれば取得して保存し、currentThinkingにセット
+      if (data.thinkingLogId) {
+        const thinkingLog = await fetchThinkingLog(data.thinkingLogId);
+        if (thinkingLog) {
+          console.log('🧠 Coach prompt thinking log fetched:', thinkingLog);
+          // 生成完了後でも思考ログを表示
+          setCurrentThinking(thinkingLog);
+        }
+      }
+
+      // 思考ログIDがあれば、各プロンプトに付与
+      const promptsWithThinkingLog = (data.suggestions || []).map((prompt: any) => ({
+        ...prompt,
+        thinkingLogId: prompt.thinkingLogId || data.thinkingLogId
+      }));
+
+      setCoachPrompts(promptsWithThinkingLog);
+      setShowPromptSelector(true);
+      setSelectedPromptIndex(null);
+      setEditedPrompt('');
+    } catch (err) {
+      console.error('Failed to generate coach prompts:', err);
+      setError('コーチ声掛けメッセージの生成に失敗しました');
+    } finally {
+      setLoadingPrompts(false);
+    }
+  };
+
+  const handleSelectPrompt = (index: number) => {
+    setSelectedPromptIndex(index);
+    setEditedPrompt(coachPrompts[index].message);
+  };
+
+  const handleSendSelectedPrompt = async () => {
+    if (selectedPromptIndex === null || !editedPrompt.trim()) return;
+
+    // コーチからのメッセージを履歴に追加（自動返信なし）
+    const timestamp = new Date().toISOString();
+    const coachMessage: HistoryEntry = {
+      role: 'coach',
+      ts: timestamp,
+      text: editedPrompt
+    };
+    setHistory(prev => [...prev, coachMessage]);
+
+    // 履歴をサーバーに保存
+    writeHistory(threadId, 'coach', editedPrompt);
+
+    // 思考ログIDを保存（もしあれば）
+    const selectedPrompt = coachPrompts[selectedPromptIndex];
+    if (selectedPrompt && (selectedPrompt as any).thinkingLogId) {
+      const thinkingLogId = (selectedPrompt as any).thinkingLogId;
+      // 思考ログを取得して、タイムスタンプと紐付けて保存
+      const thinkingLog = await fetchThinkingLog(thinkingLogId);
+      if (thinkingLog) {
+        // 思考ログのstartTimeをメッセージのタイムスタンプで上書き
+        // これにより、履歴表示時にタイムスタンプベースでマッチングできる
+        const updatedLog = {
+          ...thinkingLog,
+          startTime: timestamp,
+          threadId: threadId
+        };
+        setThinkingLogs(prev => {
+          const newMap = new Map(prev);
+          // タイムスタンプベースのキーで保存
+          newMap.set(`coach-prompt-${timestamp}`, updatedLog);
+          return newMap;
+        });
+      }
+    }
+
+    // モーダルを閉じてリセット
+    setShowPromptSelector(false);
+    setCoachPrompts([]);
+    setSelectedPromptIndex(null);
+    setEditedPrompt('');
+  };
+
+  // 履歴をサーバーに保存する関数
+  const writeHistory = async (threadId: string, role: string, text: string) => {
+    try {
+      const base = engine === 'mastra' ? '/agent' : engine === 'langgraph' ? '/agent-lg' : '/agent-oa';
+      await fetch(`${base}/history/${threadId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role, text })
+      });
+    } catch (err) {
+      console.error('Failed to write history:', err);
     }
   };
 
@@ -1903,14 +2087,15 @@ export function App() {
 
                 {/* リアルタイム思考状況表示 - ローディング中または最近完了した思考ログを表示 */}
                 {(() => {
-                  console.log('🧠 Thinking display check:', { 
-                    currentThinking: !!currentThinking, 
-                    engine, 
+                  console.log('🧠 Thinking display check:', {
+                    currentThinking: !!currentThinking,
+                    loadingPrompts,
+                    engine,
                     isMastra: engine === 'mastra',
-                    shouldShow: currentThinking && (engine === 'mastra'),
+                    shouldShow: (currentThinking || loadingPrompts) && (engine === 'mastra'),
                     currentThinkingSteps: currentThinking?.steps?.length || 0
                   });
-                  return currentThinking && (engine === 'mastra');
+                  return (currentThinking || loadingPrompts) && (engine === 'mastra');
                 })() && (
                   <div style={{
                     marginBottom: 16,
@@ -1934,8 +2119,8 @@ export function App() {
                         alignItems: 'center',
                         gap: 6
                       }}>
-                        {loading ? '🤔 コーチ (思考中...)' : '🧠 コーチ (思考完了)'}
-                        {loading && (
+                        {loading ? '🤔 コーチ (思考中...)' : loadingPrompts ? '💭 声掛けメッセージ生成中...' : '🧠 コーチ (思考完了)'}
+                        {(loading || loadingPrompts) && (
                           <div style={{
                             width: 16,
                             height: 16,
@@ -1951,17 +2136,27 @@ export function App() {
                         fontSize: '0.8rem',
                         fontStyle: 'italic'
                       }}>
-                        {currentThinking.steps.length > 0 && 
-                          currentThinking.steps[currentThinking.steps.length - 1].content}
+                        {(() => {
+                          console.log('🎯 Current thinking steps:', currentThinking?.steps);
+                          if (currentThinking?.steps?.length > 0) {
+                            const lastStep = currentThinking.steps[currentThinking.steps.length - 1];
+                            return `${lastStep.step}: ${lastStep.content}`;
+                          }
+                          return loadingPrompts
+                            ? '声掛けメッセージを生成中...'
+                            : '思考を開始しています...';
+                        })()}
                       </div>
                       <div style={{
                         marginTop: 4,
                         fontSize: '0.7rem',
                         color: '#a16207'
                       }}>
-                        {loading 
-                          ? `処理中... (${currentThinking.steps.length} ステップ完了)`
-                          : `思考完了 (${currentThinking.steps.length} ステップ)`
+                        {loadingPrompts
+                          ? `処理中... (${currentThinking?.steps?.length || 0} ステップ)`
+                          : loading
+                            ? `処理中... (${currentThinking?.steps?.length || 0} ステップ完了)`
+                            : `思考完了 (${currentThinking?.steps?.length || 0} ステップ)`
                         }
                       </div>
                     </div>
@@ -2223,12 +2418,39 @@ export function App() {
                           }}>
                             {typeLabels[memory.type]}
                           </span>
-                          <span style={{
-                            fontSize: '0.65rem',
-                            color: '#9ca3af'
+                          <div style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 8
                           }}>
-                            {Math.round(memory.relevance * 100)}%
-                          </span>
+                            <span style={{
+                              fontSize: '0.65rem',
+                              color: '#9ca3af'
+                            }}>
+                              {Math.round(memory.relevance * 100)}%
+                            </span>
+                            <button
+                              onClick={() => deleteMemoryItem(memory.id)}
+                              style={{
+                                padding: '2px 6px',
+                                fontSize: '0.65rem',
+                                background: '#ef4444',
+                                color: 'white',
+                                border: 'none',
+                                borderRadius: 3,
+                                cursor: 'pointer',
+                                transition: 'all 0.2s'
+                              }}
+                              onMouseOver={(e) => {
+                                e.currentTarget.style.background = '#dc2626';
+                              }}
+                              onMouseOut={(e) => {
+                                e.currentTarget.style.background = '#ef4444';
+                              }}
+                            >
+                              削除
+                            </button>
+                          </div>
                         </div>
                         <div style={{
                           fontSize: '0.75rem',
@@ -2367,9 +2589,28 @@ export function App() {
             fontSize: '1rem',
             display: 'flex',
             alignItems: 'center',
-            gap: 8
+            justifyContent: 'space-between'
           }}>
-            🎓 コーチとして発言
+            <span>🎓 コーチとして発言</span>
+            <button
+              type="button"
+              onClick={handleCoachPrompt}
+              disabled={loadingPrompts || loading}
+              style={{
+                padding: '8px 16px',
+                fontSize: '0.9rem',
+                border: 'none',
+                borderRadius: 6,
+                backgroundColor: loadingPrompts ? '#ccc' : 'rgba(255, 255, 255, 0.2)',
+                color: 'white',
+                fontWeight: 600,
+                cursor: loadingPrompts || loading ? 'not-allowed' : 'pointer',
+                transition: 'all 0.2s',
+                backdropFilter: 'blur(10px)'
+              }}
+            >
+              {loadingPrompts ? '🔄 生成中...' : '💬 声掛け'}
+            </button>
           </div>
           <form onSubmit={handleCoachSubmit} style={{ padding: 20 }}>
             <textarea
@@ -2413,6 +2654,202 @@ export function App() {
             </button>
           </form>
         </div>
+
+        {/* コーチ声掛けメッセージ選択モーダル */}
+        {showPromptSelector && (
+          <div style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1000
+          }}>
+            <div style={{
+              backgroundColor: 'white',
+              borderRadius: 16,
+              padding: 30,
+              maxWidth: 800,
+              width: '90%',
+              maxHeight: '80vh',
+              overflow: 'auto',
+              boxShadow: '0 8px 32px rgba(0, 0, 0, 0.15)'
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+                <h2 style={{ margin: 0, color: '#2c3e50' }}>
+                  💬 コーチから声掛けメッセージを選択
+                </h2>
+                {coachPrompts.length > 0 && coachPrompts[0].thinkingLogId && (
+                  <button
+                    onClick={async () => {
+                      const thinkingLogId = coachPrompts[0].thinkingLogId;
+                      if (thinkingLogId) {
+                        // 思考ログを取得してから表示
+                        await fetchThinkingLog(thinkingLogId);
+                        setShowThinkingPopup(thinkingLogId);
+                      }
+                    }}
+                    style={{
+                      padding: '8px 16px',
+                      borderRadius: 8,
+                      border: '1px solid #e0e0e0',
+                      backgroundColor: '#f8f9fa',
+                      color: '#495057',
+                      cursor: 'pointer',
+                      fontSize: '0.9rem',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6
+                    }}
+                  >
+                    🧠 思考ログを見る
+                  </button>
+                )}
+              </div>
+
+              <div style={{ marginBottom: 30 }}>
+                {coachPrompts.map((prompt, index) => (
+                  <div key={prompt.id} style={{
+                    marginBottom: 20,
+                    padding: 20,
+                    borderRadius: 12,
+                    border: selectedPromptIndex === index ? '2px solid #4a90e2' : '1px solid #e0e0e0',
+                    backgroundColor: selectedPromptIndex === index ? '#f0f8ff' : '#fafafa',
+                    transition: 'all 0.2s'
+                  }}>
+                    <div style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'flex-start',
+                      marginBottom: 10
+                    }}>
+                      <div style={{
+                        padding: '4px 10px',
+                        borderRadius: 6,
+                        backgroundColor: '#e8f4fd',
+                        color: '#2c3e50',
+                        fontSize: '0.9rem',
+                        fontWeight: 500
+                      }}>
+                        {prompt.type === 'daily_suggestion' && '📚 学習提案'}
+                        {prompt.type === 'progress_review' && '📊 進捗確認'}
+                        {prompt.type === 'motivation_boost' && '💪 モチベーション'}
+                      </div>
+                      <div style={{
+                        display: 'flex',
+                        gap: 10
+                      }}>
+                        <button
+                          onClick={() => handleSelectPrompt(index)}
+                          style={{
+                            padding: '6px 12px',
+                            borderRadius: 6,
+                            border: 'none',
+                            backgroundColor: selectedPromptIndex === index ? '#4a90e2' : '#6c757d',
+                            color: 'white',
+                            cursor: 'pointer',
+                            fontSize: '0.9rem'
+                          }}
+                        >
+                          {selectedPromptIndex === index ? '✅ 選択中' : '選択'}
+                        </button>
+                      </div>
+                    </div>
+
+                    <p style={{
+                      margin: 0,
+                      lineHeight: 1.6,
+                      color: '#2c3e50'
+                    }}>
+                      {prompt.message}
+                    </p>
+
+                    <div style={{
+                      marginTop: 10,
+                      fontSize: '0.85rem',
+                      color: '#6c757d'
+                    }}>
+                      理由: {prompt.reasoning}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {selectedPromptIndex !== null && (
+                <div style={{
+                  marginBottom: 20,
+                  padding: 20,
+                  borderRadius: 12,
+                  backgroundColor: '#f9f9f9',
+                  border: '1px solid #e0e0e0'
+                }}>
+                  <h3 style={{ marginBottom: 10, color: '#2c3e50' }}>
+                    ✏️ メッセージを編集
+                  </h3>
+                  <textarea
+                    value={editedPrompt}
+                    onChange={(e) => setEditedPrompt(e.target.value)}
+                    rows={4}
+                    style={{
+                      width: '100%',
+                      padding: 12,
+                      borderRadius: 8,
+                      border: '1px solid #ddd',
+                      fontSize: '1rem',
+                      resize: 'vertical'
+                    }}
+                  />
+                </div>
+              )}
+
+              <div style={{
+                display: 'flex',
+                justifyContent: 'flex-end',
+                gap: 10
+              }}>
+                <button
+                  onClick={() => {
+                    setShowPromptSelector(false);
+                    setCoachPrompts([]);
+                    setSelectedPromptIndex(null);
+                    setEditedPrompt('');
+                  }}
+                  style={{
+                    padding: '10px 20px',
+                    borderRadius: 8,
+                    border: '1px solid #ddd',
+                    backgroundColor: 'white',
+                    color: '#6c757d',
+                    cursor: 'pointer',
+                    fontSize: '1rem'
+                  }}
+                >
+                  キャンセル
+                </button>
+                <button
+                  onClick={handleSendSelectedPrompt}
+                  disabled={selectedPromptIndex === null || !editedPrompt.trim()}
+                  style={{
+                    padding: '10px 20px',
+                    borderRadius: 8,
+                    border: 'none',
+                    backgroundColor: selectedPromptIndex !== null && editedPrompt.trim() ? '#28a745' : '#ccc',
+                    color: 'white',
+                    cursor: selectedPromptIndex !== null && editedPrompt.trim() ? 'pointer' : 'not-allowed',
+                    fontSize: '1rem',
+                    fontWeight: 600
+                  }}
+                >
+                  送信
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 思考ログポップアップモーダル */}

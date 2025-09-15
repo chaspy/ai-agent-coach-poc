@@ -1,6 +1,7 @@
 node_modules
 
 agent-poc/data/history/
+agent-poc/data/memories/
 agent-poc-oa/agent-poc-oa/data/history/
 agent-poc-lg/data/history/
 agent-poc/agent-poc/data/history/

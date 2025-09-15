@@ -27,6 +27,18 @@ class ThinkingLogStore {
   
   // 新しい思考セッション開始
   startThinking(sessionId: string, threadId: string, messageId: string, userId: string): ThinkingLog {
+    // 古いログをクリーンアップ（30秒以上前のログを削除）
+    const now = Date.now();
+    this.logs.forEach((log, id) => {
+      const logTime = new Date(log.startTime).getTime();
+      if (now - logTime > 30000) { // 30秒以上前
+        this.logs.delete(id);
+        if (this.currentMessageId === id) {
+          this.currentMessageId = null;
+        }
+      }
+    });
+
     const log: ThinkingLog = {
       sessionId,
       threadId,
@@ -36,7 +48,7 @@ class ThinkingLogStore {
       status: 'thinking',
       steps: []
     };
-    
+
     this.logs.set(messageId, log);
     this.currentMessageId = messageId; // 現在のメッセージIDを設定
     console.log(`[ThinkingLog] 🤔 思考開始: ${messageId}`);
@@ -68,15 +80,15 @@ class ThinkingLogStore {
   completeThinking(messageId: string, status: 'completed' | 'error' = 'completed') {
     const log = this.logs.get(messageId);
     if (!log) return;
-    
+
     log.endTime = new Date().toISOString();
     log.status = status;
-    
-    // 現在のメッセージIDをクリア
+
+    // 現在のメッセージIDをクリア（完了後5秒間は表示されるようにした）
     if (this.currentMessageId === messageId) {
       this.currentMessageId = null;
     }
-    
+
     console.log(`[ThinkingLog] ✅ 思考完了: ${messageId} (${status})`);
   }
   
@@ -104,10 +116,47 @@ class ThinkingLogStore {
       .sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime());
   }
   
-  // 現在思考中のログ取得
+  // 現在思考中のログ取得（コーチ声掛け生成も含む）
   getCurrentThinkingLogs(): ThinkingLog[] {
-    return Array.from(this.logs.values())
-      .filter(log => log.status === 'thinking');
+    console.log(`[ThinkingLog] getCurrentThinkingLogs called - currentMessageId: ${this.currentMessageId}, logs size: ${this.logs.size}`);
+
+    // デバッグ: 全ログをリスト
+    this.logs.forEach((log, id) => {
+      console.log(`[ThinkingLog] - ${id}: status=${log.status}, steps=${log.steps.length}`);
+    });
+
+    // 現在のメッセージIDがあればそのログを返す（statusに関係なく）
+    if (this.currentMessageId) {
+      const currentLog = this.logs.get(this.currentMessageId);
+      console.log(`[ThinkingLog] Current log found:`, currentLog ? `yes (${currentLog.steps.length} steps)` : 'no');
+      if (currentLog) {
+        return [currentLog];
+      }
+    }
+
+    // 最近15秒以内に開始されたログを返す（thinking状態または最近完了したものも含む）
+    const now = Date.now();
+    const recentLogs = Array.from(this.logs.values())
+      .filter(log => {
+        const logTime = new Date(log.startTime).getTime();
+        const isRecent = (now - logTime) < 15000; // 15秒以内
+        const isCoachPrompt = log.messageId.startsWith('coach_prompt_');
+
+        // thinking状態、coach_prompt、または最近完了したログを返す
+        if (log.status === 'thinking') return isRecent;
+        if (isCoachPrompt) return isRecent;
+
+        // 完了後5秒以内なら表示継続
+        if (log.status === 'completed' && log.endTime) {
+          const endTime = new Date(log.endTime).getTime();
+          return (now - endTime) < 5000; // 完了後5秒間は表示
+        }
+
+        return false;
+      });
+
+    console.log(`[ThinkingLog] Recent logs found: ${recentLogs.length}`);
+    return recentLogs;
   }
 }
 

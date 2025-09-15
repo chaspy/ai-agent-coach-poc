@@ -62,3 +62,48 @@ export interface AskInput {
   topK?: number;
   debug?: boolean;
 }
+
+// コーチ声掛け機能の型定義
+export type CoachMessageType =
+  | 'daily_suggestion'    // 日々の学習提案
+  | 'progress_review'     // 進捗確認
+  | 'motivation_boost'    // モチベーション向上
+  | 'celebration'         // お祝い・褒め
+  | 'gentle_reminder'     // 優しいリマインダー
+  | 'challenge_support';  // 課題サポート
+
+export interface CoachPromptInput {
+  threadId: string;
+  studentId: string;
+  coachId: string;
+  messageType?: CoachMessageType;
+}
+
+export interface CoachPrompt {
+  id: string;
+  type: CoachMessageType;
+  message: string;
+  confidence: number;  // 0-1
+  reasoning: string;   // なぜこのメッセージを生成したか
+}
+
+export interface CoachPromptResponse {
+  suggestions: CoachPrompt[];
+}
+
+// 学習パターン分析結果
+export interface StudyPattern {
+  consecutiveDays: number;
+  totalStudyHours: number;
+  lastStudyDate?: string;
+  completedTasks: number;
+  totalTasks: number;
+  recentSubjects: string[];
+  challengesOvercome: string[];
+  currentMood?: string;
+  commitmentStatus: {
+    pending: number;
+    completed: number;
+    overdue: number;
+  };
+}
