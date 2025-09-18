@@ -393,8 +393,9 @@ export function App() {
   const fetchThinkingLog = async (messageId: string) => {
     try {
       const base = engine === 'mastra' ? '/agent' : engine === 'langgraph' ? '/agent-lg' : '/agent-oa';
-      // バックエンドのポートは3000
-      const backendUrl = `http://localhost:3000${base}/thinking/${messageId}`;
+      // バックエンドのポートはエンジンごとに異なる
+      const port = engine === 'mastra' ? '4120' : engine === 'langgraph' ? '4121' : '4122';
+      const backendUrl = `http://localhost:${port}${base}/thinking/${messageId}`;
       console.log('🧠 Fetching thinking log from:', backendUrl);
       const res = await fetch(backendUrl);
       if (res.ok) {
@@ -413,7 +414,8 @@ export function App() {
   const fetchCurrentThinking = async () => {
     try {
       const base = engine === 'mastra' ? '/agent' : engine === 'langgraph' ? '/agent-lg' : '/agent-oa';
-      const backendUrl = `http://localhost:3000${base}/thinking/current`;
+      const port = engine === 'mastra' ? '4120' : engine === 'langgraph' ? '4121' : '4122';
+      const backendUrl = `http://localhost:${port}${base}/thinking/current`;
       console.log('🧠 Fetching current thinking from:', backendUrl, { threadId, engine });
       const res = await fetch(backendUrl);
       console.log('🧠 Thinking response status:', res.status);
@@ -1158,7 +1160,7 @@ export function App() {
     setCurrentThinking(null); // 古い思考ログをクリア
 
     try {
-      const response = await fetch(`http://localhost:${engine === 'mastra' ? '3000' : engine === 'langgraph' ? '3001' : '3002'}/agent/coach-prompt`, {
+      const response = await fetch(`http://localhost:${engine === 'mastra' ? '4120' : engine === 'langgraph' ? '4121' : '4122'}/agent/coach-prompt`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
