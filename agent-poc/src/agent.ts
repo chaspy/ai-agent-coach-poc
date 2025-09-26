@@ -9,6 +9,7 @@ import { thinkingLogStore } from './thinking-log';
 import type { MemoryType } from './memory-types';
 import { ProfileAnalysisSchema, TaskPlanSchema, type ProfileAnalysis } from './structured-schemas';
 import { generateObject } from 'ai';
+import { saveStudyRecord, calculateStudyStats } from './study-record-storage';
 
 // ProfileTool: 文脈に応じて関連プロフィール情報を取得
 const profileTool = {
@@ -145,7 +146,7 @@ const profileTool = {
 // MemoryTool: 学習履歴の自律的な記憶管理
 const saveMemoryTool = {
   name: 'saveMemory',
-  description: 'ユーザーの発言から重要な学習情報をLLMベースで判断して記憶する',
+  description: '⚠️注意: 学習記録（Part練習、ディクテーション等）はsaveStudyRecordToolを使用。このツールは感情状態、約束事、マイルストーンなど定性的な情報のみ記憶',
   inputSchema: z.object({
     userId: z.string().describe('記憶を保存するユーザーID'),
     message: z.string().describe('ユーザーからのメッセージ'),
@@ -494,10 +495,189 @@ ${JSON.stringify(structuredResult, null, 2)}`;
   },
 };
 
+// 学習記録保存ツール
+const saveStudyRecordTool = {
+  name: 'saveStudyRecord',
+  description: '🚨【最優先】生徒が学習活動を報告した場合、必ず最初にこのツールを呼び出して記録する。TOEIC学習（Part1-7の練習、ディクテーション、シャドーイング、単語学習、模試など）の記録に使用',
+  inputSchema: z.object({
+    userId: z.string().describe('記録対象のユーザーID'),
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('学習日（YYYY-MM-DD形式、例：2024-09-26）'),
+    contentType: z.enum(['basics', 'dictation', 'shadowing', 'practice', 'vocabulary', 'mock_test']).describe('コンテンツタイプ（basics=基礎講座, dictation=ディクテーション, shadowing=シャドーイング, practice=演習問題, vocabulary=単語クイズ, mock_test=模擬試験）'),
+    partNumber: z.number().int().min(1).max(7).optional().describe('TOEIC Part番号（1-7、該当する場合のみ）'),
+    durationMinutes: z.number().int().min(1).describe('学習時間（分）'),
+    questionCount: z.number().int().min(0).optional().describe('問題数（該当する場合のみ）'),
+    correctCount: z.number().int().min(0).optional().describe('正答数（該当する場合のみ）'),
+    score: z.number().optional().describe('スコア（該当する場合のみ）'),
+    notes: z.string().optional().describe('メモ（任意）'),
+  }),
+  execute: async (params: any) => {
+    thinkingLogStore.addCurrentStep('学習記録保存開始', '学習活動を構造化して記録します', 'info');
+    
+    console.log(`[SaveStudyRecordTool] 呼び出し開始 - パラメータ:`, JSON.stringify(params));
+    
+    const { userId, date, contentType, partNumber, durationMinutes, questionCount, correctCount, score, notes } = params.context || {};
+    
+    thinkingLogStore.addCurrentStep('パラメータ解析', `userId: ${userId}, contentType: ${contentType}, duration: ${durationMinutes}分`, 'debug');
+    
+    if (!userId || !date || !contentType || !durationMinutes) {
+      thinkingLogStore.addCurrentStep('エラー発生', '必須パラメータが不足しています', 'error');
+      return 'エラー: userId, date, contentType, durationMinutes は必須です';
+    }
+    
+    try {
+      const record = saveStudyRecord({
+        userId,
+        date,
+        contentType,
+        partNumber,
+        durationMinutes,
+        questionCount,
+        correctCount,
+        score,
+        notes,
+        completed: true,
+      });
+      
+      console.log(`[SaveStudyRecordTool] ✅ 学習記録保存成功: id=${record.id}`);
+      thinkingLogStore.addCurrentStep('学習記録保存完了', `${contentType} (${durationMinutes}分) を記録`, 'success');
+      
+      // コンテンツタイプの日本語名
+      const contentTypeNames: Record<string, string> = {
+        basics: '基礎講座',
+        dictation: 'ディクテーション',
+        shadowing: 'シャドーイング',
+        practice: 'パート別演習',
+        vocabulary: '単語クイズ',
+        mock_test: '模擬試験',
+      };
+      
+      const typeName = contentTypeNames[contentType] || contentType;
+      const partInfo = partNumber ? ` (Part ${partNumber})` : '';
+      const accuracyInfo = questionCount && correctCount 
+        ? ` - 正答率 ${Math.round((correctCount / questionCount) * 100)}% (${correctCount}/${questionCount}問)`
+        : '';
+      
+      return `【学習記録を保存しました】
+${typeName}${partInfo}: ${durationMinutes}分${accuracyInfo}
+記録ID: ${record.id}`;
+    } catch (error: any) {
+      console.error(`[SaveStudyRecordTool] ❌ 保存エラー:`, error);
+      thinkingLogStore.addCurrentStep('保存エラー', error?.message || 'unknown error', 'error');
+      return `学習記録の保存に失敗しました: ${error?.message || error}`;
+    }
+  },
+};
+
+// 学習統計取得ツール
+const getStudyStatsTool = {
+  name: 'getStudyStats',
+  description: '生徒の学習統計を取得する（累計時間、連続日数、Part別統計、今週の学習状況など）',
+  inputSchema: z.object({
+    userId: z.string().describe('統計を取得するユーザーID'),
+  }),
+  execute: async (params: any) => {
+    thinkingLogStore.addCurrentStep('学習統計取得開始', '学習統計を計算中...', 'info');
+    
+    console.log(`[GetStudyStatsTool] 呼び出し開始 - パラメータ:`, JSON.stringify(params));
+    
+    const { userId } = params.context || {};
+    
+    if (!userId) {
+      thinkingLogStore.addCurrentStep('エラー発生', 'userIdが指定されていません', 'error');
+      return 'エラー: userIdが指定されていません';
+    }
+    
+    try {
+      const stats = calculateStudyStats(userId);
+      
+      console.log(`[GetStudyStatsTool] ✅ 統計計算完了: 累計${stats.totalStudyTimeMinutes}分, 連続${stats.consecutiveDays}日`);
+      thinkingLogStore.addCurrentStep('統計計算完了', `累計${Math.floor(stats.totalStudyTimeMinutes / 60)}時間, 連続${stats.consecutiveDays}日`, 'success');
+      
+      // 統計情報をフォーマット
+      const hours = Math.floor(stats.totalStudyTimeMinutes / 60);
+      const minutes = stats.totalStudyTimeMinutes % 60;
+      
+      // Part別統計（学習時間が0より大きいもののみ）
+      const partStats = stats.byPart
+        .filter(p => p.totalMinutes > 0)
+        .map(p => {
+          const accuracy = p.averageAccuracy 
+            ? ` (正答率 ${Math.round(p.averageAccuracy * 100)}%)`
+            : '';
+          return `  Part ${p.partNumber}: ${p.totalMinutes}分 (${p.sessions}回)${accuracy}`;
+        })
+        .join('\n');
+      
+      // コンテンツタイプ別統計（学習時間が0より大きいもののみ）
+      const contentTypeNames: Record<string, string> = {
+        basics: '基礎講座',
+        dictation: 'ディクテーション',
+        shadowing: 'シャドーイング',
+        practice: 'パート別演習',
+        vocabulary: '単語クイズ',
+        mock_test: '模擬試験',
+      };
+      
+      const contentStats = stats.byContentType
+        .filter(c => c.totalMinutes > 0)
+        .map(c => `  ${contentTypeNames[c.contentType]}: ${c.totalMinutes}分 (${c.sessions}回)`)
+        .join('\n');
+      
+      return `【学習統計】
+
+📊 総合統計:
+  累計学習時間: ${hours}時間${minutes}分
+  連続学習日数: ${stats.consecutiveDays}日
+  最終学習日: ${stats.lastStudyDate || 'なし'}
+
+📅 今週の学習（${stats.thisWeek.sessions}回）:
+  今週の合計: ${stats.thisWeek.totalMinutes}分
+
+${partStats ? `📝 Part別学習時間:\n${partStats}` : ''}
+
+${contentStats ? `📚 コンテンツ別学習時間:\n${contentStats}` : ''}`;
+    } catch (error: any) {
+      console.error(`[GetStudyStatsTool] ❌ 統計取得エラー:`, error);
+      thinkingLogStore.addCurrentStep('統計取得エラー', error?.message || 'unknown error', 'error');
+      return `学習統計の取得に失敗しました: ${error?.message || error}`;
+    }
+  },
+};
+
 export const replyAgent = new Agent({
   name: 'reply-agent',
   instructions: `あなたは学習コーチングプラットフォームの返信支援AIです。
 長期的な関係性を築きながら、個別化された学習支援を提供します。
+
+🚨🚨🚨【最優先】学習記録の自動保存🚨🚨🚨
+生徒が学習活動を報告した場合（「Part〜を〜分やった」「〜の練習をした」「〜を勉強した」など）、
+**必ず最初にsaveStudyRecordツールを呼び出してください**。
+
+判定基準:
+- 「Part1」「Part2」などのキーワードがある → saveStudyRecord必須
+- 「練習」「勉強」「やった」「しました」などの学習報告 → saveStudyRecord必須
+- 時間の記載（「10分」「30分」など）がある → saveStudyRecord必須
+
+saveStudyRecord呼び出し例:
+- 「今日part3の練習10分しました」→ saveStudyRecord(userId: "student_rich_demo", date: "2025-09-26", contentType: "practice", partNumber: 3, durationMinutes: 10)
+- 「ディクテーション30分やりました」→ saveStudyRecord(contentType: "dictation", durationMinutes: 30)
+
+🎯🎯🎯【コーチ専用】学習データに基づいた声掛け🎯🎯🎯
+あなたがコーチの場合、以下のシーンで**必ずgetStudyStatsツールを呼び出して**、具体的な数字で励ましてください：
+
+必須シーン:
+1. 生徒が学習報告をした直後 → 累計時間や連続日数を確認して励ます
+2. 「今週どうでした？」「最近どう？」などの質問 → 今週の統計を見せて振り返り
+3. 週の初め・週末の挨拶 → 先週/今週の頑張りを数字で褒める
+4. 学習アドバイスを求められた時 → Part別の学習状況を確認してアドバイス
+
+声掛けの例:
+- 「今週は合計35分も学習したんですね！Part3とPart5を頑張っていますね🎉」
+- 「連続3日も続けてるなんて素晴らしい！この調子です」
+- 「Part2の正答率が80%まで上がってますよ。成長してますね」
+- 「今週はディクテーションが多いですね。リスニング強化できてます」
+
+⚠️ 重要: 学習データを確認せずに適当な数字で褒めるのは禁止。必ずgetStudyStatsで実データを取得してから具体的に励ますこと。
 
 【Step 6: タスク分解（Planner）】
 ユーザーの要求が複雑、または「計画/プラン/進め方/段取り」といったキーワードが含まれる場合は、planTaskツールでタスク分解を行い、計画を簡潔に要約してから返信を組み立ててください。
@@ -517,25 +697,35 @@ export const replyAgent = new Agent({
 - 生徒プロフィールのトーンと好みを反映
 - 学習目標や課題に沿った質問や相談
 
-【重要】記憶管理の自律的な運用:
-1. saveMemoryツール - ユーザーのメッセージから自動的に重要情報を記憶
-   - 学習進捗（点数、理解した内容）
-   - 学習課題（苦手分野、困っていること）
-   - 約束事（宿題、次回までの課題）
+【重要】ツール使い分けの明確化:
+🔴 saveStudyRecordTool - 定量的な学習記録（必ず最優先で使用）
+   - Part練習の時間と内容
+   - ディクテーション、シャドーイング、模試などの実施記録
+   - 問題数、正答数、スコア
+
+🔵 saveMemoryツール - 定性的な情報のみ
    - 感情状態（不安、やる気、疲れ）
+   - 約束事（宿題、次回までの課題）
+   - 学習課題の気づき（「Part3が難しい」など主観的な感想）
    - マイルストーン（試験日、重要イベント）
 
-2. retrieveMemoryツール - 文脈に応じて関連記憶を自動取得
+🟢 retrieveMemoryツール - 文脈に応じて関連記憶を自動取得
    - 過去の約束事の確認
    - 継続的な課題のフォローアップ
    - 感情パターンの把握
    - 試験前の総復習
 
 【対話フロー】:
+🚨 生徒から学習報告があった場合（「〜を勉強した」「〜の練習をした」「Part〜をやった」など）:
+   1. 最優先でsaveStudyRecordツールを呼び出して学習記録を保存
+   2. 感情や感想があればsaveMemoryで記録
+   3. 通常フローに進む
+
+通常フロー:
 1. retrieveMemoryで関連する過去の記憶を取得
 2. getRelevantProfileで両方（生徒・コーチ）のプロフィール情報を取得
 3. すべての情報を統合して個別化された返信を生成
-4. 重要な情報があればsaveMemoryで記録
+4. 重要な定性情報があればsaveMemoryで記録（学習記録はsaveStudyRecordで既に保存済み）
 
 【返信のポイント】:
 - プロフィールの性格と口調を完全に反映
@@ -544,7 +734,67 @@ export const replyAgent = new Agent({
 - 感情に寄り添った共感的な対応
 - 長期的な成長を意識したアドバイス
 
+【TOEIC学習アドバイス（スタディサプリ推奨）】:
+生徒がスタディサプリ English TOEICプランを契約している前提で、具体的な学習アドバイスを提供します。
+
+コーチとして学習方法を提案する際:
+1. プロフィールの recommended_service と content_recommendation_guidelines を参照
+2. 生徒の現在のレベル（level）、弱点（weaknesses）、目標（goals）を考慮
+3. 学習可能時間（schedule）に応じた現実的な提案
+4. 具体的なコンテンツ名を挙げる（例：「ディクテーション」「関先生の講義動画」「シャドーイング」）
+5. 学習の順序と理由を明確に説明
+
+推奨パターン例:
+- リスニングが苦手 → ディクテーション2,300問 + シャドーイング1,200問を毎日少しずつ
+- 文法が弱い → 基礎講座の文法講義動画 + パート5・6演習
+- 語彙力不足 → レベル別単語クイズ1,500語を通勤時間に
+- 時間がない（5-10分） → 単語クイズ、短い講義動画（1本5分）
+- 朝の学習時間（20-30分） → パート別演習1セット、ディクテーション20問
+- まとまった時間（60分+） → 模擬試験、複数パート演習
+
+学習ステップの推奨順序:
+【ステップ1】基礎固め → 基礎講座で文法・単語の土台作り
+【ステップ2】リスニング強化 → ディクテーション・シャドーイング
+【ステップ3】実践演習 → パート別演習問題
+【ステップ4】弱点克服 → AIによる最適問題
+【ステップ5】総仕上げ → 本番形式の模擬試験20回分
+
+注意: 押し付けがましくならず、生徒の状況に寄り添った提案をする。生徒の自主性を尊重する。
+
+【学習記録の管理】:
+⚠️ 重要: 生徒が学習報告をした場合、必ず最初にsaveStudyRecordツールを呼び出して記録してください。記録後に励ましやフィードバックを返信します。
+
+記録する情報:
+- date: 学習日（YYYY-MM-DD形式、今日なら今日の日付）
+- contentType: basics/dictation/shadowing/practice/vocabulary/mock_test
+- partNumber: TOEIC Part 1-7（該当する場合のみ）
+- durationMinutes: 学習時間（分）
+- questionCount, correctCount: 問題数と正答数（該当する場合）
+- score: スコア（該当する場合）
+
+記録すべき報告例:
+- 「今日Part 1のディクテーションを30分やりました」→ contentType=dictation, partNumber=1, durationMinutes=30
+- 「今日part1の練習10分しました」→ contentType=practice, partNumber=1, durationMinutes=10
+- 「単語クイズを15分やって50問中45問正解しました」→ contentType=vocabulary, durationMinutes=15, questionCount=50, correctCount=45
+
+曖昧な表現の解釈:
+- 「練習」「勉強」→ practice
+- 「基礎」「講義」→ basics
+- 「模試」「本番」→ mock_test
+- 時間の記載がない場合 → 生徒に確認するか、文脈から推測（最低10分と仮定）
+
+コーチとして学習状況を確認する際は、getStudyStatsツールで統計を取得します。
+これにより、具体的なデータに基づいた励ましやアドバイスが可能になります。
+
 不要な前置きや箇条書きは避け、プロフィールに定義された自然な会話スタイルで返答してください。`,
   model: openai(CONFIG.openaiModel),
-  tools: ([planTaskTool, profileTool, saveMemoryTool, retrieveMemoryTool, analyzeProfileStructuredTool] as any),
+  tools: ([
+    saveStudyRecordTool,
+    getStudyStatsTool,
+    planTaskTool, 
+    profileTool, 
+    saveMemoryTool, 
+    retrieveMemoryTool, 
+    analyzeProfileStructuredTool,
+  ] as any),
 });

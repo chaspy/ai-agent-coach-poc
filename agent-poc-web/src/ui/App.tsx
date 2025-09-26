@@ -47,6 +47,46 @@ type Memory = {
   expired: boolean;
 };
 
+type StudyRecord = {
+  id: string;
+  userId: string;
+  date: string; // YYYY-MM-DD
+  contentType: 'basics' | 'dictation' | 'shadowing' | 'practice' | 'vocabulary' | 'mock_test';
+  partNumber?: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+  durationMinutes: number;
+  questionCount?: number;
+  correctCount?: number;
+  score?: number;
+  notes?: string;
+  completed: boolean;
+};
+
+type StudyStats = {
+  userId: string;
+  totalStudyTimeMinutes: number;
+  consecutiveDays: number;
+  lastStudyDate?: string;
+  byPart: Array<{
+    partNumber: 1 | 2 | 3 | 4 | 5 | 6 | 7;
+    totalMinutes: number;
+    sessions: number;
+    averageAccuracy?: number;
+  }>;
+  byContentType: Array<{
+    contentType: string;
+    totalMinutes: number;
+    sessions: number;
+  }>;
+  thisWeek: {
+    totalMinutes: number;
+    sessions: number;
+    byDay: Array<{
+      date: string;
+      minutes: number;
+    }>;
+  };
+};
+
 type ThinkingStep = {
   id: string;
   timestamp: string;
@@ -220,6 +260,11 @@ export function App() {
   const [editedPrompt, setEditedPrompt] = useState<string>('');
   const [loadingPrompts, setLoadingPrompts] = useState(false);
 
+  // 学習記録関連の状態
+  const [studyRecords, setStudyRecords] = useState<StudyRecord[]>([]);
+  const [studyStats, setStudyStats] = useState<StudyStats | null>(null);
+  const [showStudyDashboard, setShowStudyDashboard] = useState(false);
+
   // currentPlanの変化を監視
   useEffect(() => {
     console.log('🔄 currentPlan changed:', currentPlan);
@@ -357,6 +402,25 @@ export function App() {
       }
     } catch (err) {
       console.error('Failed to fetch memories:', err);
+    }
+  };
+
+  const fetchStudyStats = async (userId: string) => {
+    try {
+      const base = engine === 'mastra' ? '/agent' : engine === 'langgraph' ? '/agent-lg' : '/agent-oa';
+      const url = `${base}/study-stats/${userId}`;
+      console.log('📊 Fetching study stats:', url);
+      const res = await fetch(url);
+      console.log('📊 Response status:', res.status);
+      if (res.ok) {
+        const data = await res.json();
+        console.log('📊 Study stats received:', data);
+        setStudyStats(data);
+      } else {
+        console.error('📊 Failed to fetch study stats, status:', res.status);
+      }
+    } catch (err) {
+      console.error('Failed to fetch study stats:', err);
     }
   };
 
@@ -574,6 +638,13 @@ export function App() {
     }
   }, [studentId, showMemories]);
 
+  // コンポーネントマウント時とstudentId変更時に学習統計を取得
+  useEffect(() => {
+    if (showStudyDashboard) {
+      fetchStudyStats(studentId);
+    }
+  }, [studentId, showStudyDashboard]);
+
   // 思考ログのポーリング（loading中、streaming中、またはloadingPrompts中）
   useEffect(() => {
     let interval: NodeJS.Timeout;
@@ -595,6 +666,19 @@ export function App() {
       }
     };
   }, [loading, streaming, loadingPrompts, threadId, engine]);
+
+  // 思考ログが完了したら自動的に非表示にする
+  useEffect(() => {
+    if (currentThinking?.status === 'completed') {
+      console.log('🧠 Thinking completed, will auto-hide in 2 seconds');
+      const timer = setTimeout(() => {
+        console.log('🧠 Auto-hiding completed thinking log');
+        setCurrentThinking(null);
+      }, 2000); // 2秒後に非表示
+      
+      return () => clearTimeout(timer);
+    }
+  }, [currentThinking?.status]);
 
   // 自動スクロール機能
   useEffect(() => {
@@ -1737,6 +1821,285 @@ export function App() {
           {lastPrompt}
         </div>
       )}
+
+      {/* 学習記録ダッシュボード */}
+      <div style={{
+        background: 'white',
+        borderRadius: 16,
+        boxShadow: '0 10px 30px rgba(0,0,0,0.1)',
+        marginBottom: 24,
+        overflow: 'hidden'
+      }}>
+        <div 
+          onClick={() => {
+            if (!showStudyDashboard) {
+              fetchStudyStats(studentId);
+            }
+            setShowStudyDashboard(!showStudyDashboard);
+          }}
+          style={{
+            background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+            padding: '16px 20px',
+            color: 'white',
+            fontWeight: 600,
+            fontSize: '1rem',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            cursor: 'pointer',
+            userSelect: 'none'
+          }}
+        >
+          <span style={{ fontSize: '0.95rem' }}>📊 学習記録ダッシュボード</span>
+          <span style={{ 
+            fontSize: '1.2rem',
+            transition: 'transform 0.2s ease'
+          }}>
+            {showStudyDashboard ? '▼' : '▶'}
+          </span>
+        </div>
+        {showStudyDashboard && !studyStats && (
+          <div style={{
+            textAlign: 'center',
+            color: '#6b7280',
+            padding: 40,
+            fontSize: '0.9rem'
+          }}>
+            データを読み込み中...
+          </div>
+        )}
+        {showStudyDashboard && studyStats && (
+          <div style={{ padding: 20 }}>
+            {/* 全体統計 */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(3, 1fr)',
+              gap: 16,
+              marginBottom: 24
+            }}>
+              <div style={{
+                background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
+                borderRadius: 12,
+                padding: 16,
+                color: 'white'
+              }}>
+                <div style={{ fontSize: '0.85rem', marginBottom: 8, opacity: 0.9 }}>累計学習時間</div>
+                <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>
+                  {Math.floor(studyStats.totalStudyTimeMinutes / 60)}
+                  <span style={{ fontSize: '1rem' }}>時間</span>
+                  {studyStats.totalStudyTimeMinutes % 60}
+                  <span style={{ fontSize: '1rem' }}>分</span>
+                </div>
+              </div>
+              <div style={{
+                background: 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)',
+                borderRadius: 12,
+                padding: 16,
+                color: 'white'
+              }}>
+                <div style={{ fontSize: '0.85rem', marginBottom: 8, opacity: 0.9 }}>連続学習日数</div>
+                <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>
+                  {studyStats.consecutiveDays}
+                  <span style={{ fontSize: '1rem' }}>日</span>
+                </div>
+              </div>
+              <div style={{
+                background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                borderRadius: 12,
+                padding: 16,
+                color: 'white'
+              }}>
+                <div style={{ fontSize: '0.85rem', marginBottom: 8, opacity: 0.9 }}>今週の学習時間</div>
+                <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>
+                  {Math.floor(studyStats.thisWeek.totalMinutes / 60)}
+                  <span style={{ fontSize: '1rem' }}>時間</span>
+                  {studyStats.thisWeek.totalMinutes % 60}
+                  <span style={{ fontSize: '1rem' }}>分</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Part別統計 */}
+            <div style={{ marginBottom: 24 }}>
+              <h3 style={{
+                fontSize: '1.1rem',
+                fontWeight: 600,
+                marginBottom: 16,
+                color: '#374151'
+              }}>📚 Part別学習状況</h3>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {studyStats.byPart.map((part) => (
+                  <div key={part.partNumber} style={{
+                    border: '1px solid #e5e7eb',
+                    borderRadius: 8,
+                    padding: 12
+                  }}>
+                    <div style={{
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      marginBottom: 8
+                    }}>
+                      <span style={{ fontWeight: 600, color: '#374151' }}>Part {part.partNumber}</span>
+                      <div style={{ display: 'flex', gap: 16, fontSize: '0.85rem', color: '#6b7280' }}>
+                        <span>
+                          {Math.floor(part.totalMinutes / 60)}時間{part.totalMinutes % 60}分
+                        </span>
+                        <span>{part.sessions}セッション</span>
+                        {part.averageAccuracy !== undefined && (
+                          <span style={{ color: '#10b981', fontWeight: 600 }}>
+                            正答率 {Math.round(part.averageAccuracy * 100)}%
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div style={{
+                      background: '#f3f4f6',
+                      height: 8,
+                      borderRadius: 4,
+                      overflow: 'hidden'
+                    }}>
+                      <div style={{
+                        background: 'linear-gradient(90deg, #10b981 0%, #059669 100%)',
+                        height: '100%',
+                        width: `${Math.min(100, (part.totalMinutes / studyStats.totalStudyTimeMinutes) * 100)}%`,
+                        transition: 'width 0.3s ease'
+                      }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* コンテンツタイプ別統計 */}
+            <div style={{ marginBottom: 24 }}>
+              <h3 style={{
+                fontSize: '1.1rem',
+                fontWeight: 600,
+                marginBottom: 16,
+                color: '#374151'
+              }}>🎯 学習コンテンツ別</h3>
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(3, 1fr)',
+                gap: 12
+              }}>
+                {studyStats.byContentType.map((content) => {
+                  const labels: Record<string, string> = {
+                    basics: '基礎講義',
+                    dictation: 'ディクテーション',
+                    shadowing: 'シャドーイング',
+                    practice: '実戦問題',
+                    vocabulary: '単語学習',
+                    mock_test: '模試'
+                  };
+                  return (
+                    <div key={content.contentType} style={{
+                      border: '1px solid #e5e7eb',
+                      borderRadius: 8,
+                      padding: 12,
+                      textAlign: 'center'
+                    }}>
+                      <div style={{
+                        fontSize: '0.85rem',
+                        color: '#6b7280',
+                        marginBottom: 4
+                      }}>
+                        {labels[content.contentType] || content.contentType}
+                      </div>
+                      <div style={{
+                        fontSize: '1.3rem',
+                        fontWeight: 'bold',
+                        color: '#374151'
+                      }}>
+                        {Math.floor(content.totalMinutes / 60)}:{String(content.totalMinutes % 60).padStart(2, '0')}
+                      </div>
+                      <div style={{
+                        fontSize: '0.75rem',
+                        color: '#9ca3af'
+                      }}>
+                        {content.sessions}回
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* 今週の日別グラフ */}
+            <div>
+              <h3 style={{
+                fontSize: '1.1rem',
+                fontWeight: 600,
+                marginBottom: 16,
+                color: '#374151'
+              }}>📅 今週の学習記録</h3>
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(7, 1fr)',
+                gap: 8
+              }}>
+                {studyStats.thisWeek.byDay.map((day) => {
+                  const date = new Date(day.date);
+                  const dayOfWeek = ['日', '月', '火', '水', '木', '金', '土'][date.getDay()];
+                  const maxMinutes = Math.max(...studyStats.thisWeek.byDay.map(d => d.minutes));
+                  const height = maxMinutes > 0 ? (day.minutes / maxMinutes) * 100 : 0;
+                  
+                  return (
+                    <div key={day.date} style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'center'
+                    }}>
+                      <div style={{
+                        fontSize: '0.75rem',
+                        color: '#6b7280',
+                        marginBottom: 4
+                      }}>
+                        {dayOfWeek}
+                      </div>
+                      <div style={{
+                        width: '100%',
+                        height: 100,
+                        background: '#f3f4f6',
+                        borderRadius: 4,
+                        display: 'flex',
+                        alignItems: 'flex-end',
+                        position: 'relative'
+                      }}>
+                        <div style={{
+                          width: '100%',
+                          height: `${height}%`,
+                          background: 'linear-gradient(180deg, #10b981 0%, #059669 100%)',
+                          borderRadius: 4,
+                          transition: 'height 0.3s ease'
+                        }} />
+                      </div>
+                      <div style={{
+                        fontSize: '0.7rem',
+                        color: '#374151',
+                        marginTop: 4,
+                        fontWeight: 600
+                      }}>
+                        {day.minutes}分
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+        {showStudyDashboard && studyStats && studyStats.totalStudyTimeMinutes === 0 && (
+          <div style={{
+            textAlign: 'center',
+            color: '#9ca3af',
+            padding: 40,
+            fontSize: '0.9rem'
+          }}>
+            まだ学習記録がありません
+          </div>
+        )}
+      </div>
 
       {/* 会話履歴とメモリーエリア - 横並び7:3の比率 */}
       <div style={{ 

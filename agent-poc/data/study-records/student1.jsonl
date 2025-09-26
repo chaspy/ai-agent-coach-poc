@@ -1,0 +1,8 @@
+{"userId":"student1","date":"2025-09-23","contentType":"dictation","partNumber":2,"durationMinutes":20,"completed":true,"id":"study_1727050800000_test001"}
+{"userId":"student1","date":"2025-09-23","contentType":"practice","partNumber":3,"durationMinutes":30,"completed":true,"questionCount":20,"correctCount":14,"id":"study_1727052600000_test002"}
+{"userId":"student1","date":"2025-09-24","contentType":"practice","partNumber":5,"durationMinutes":25,"completed":true,"questionCount":30,"correctCount":24,"id":"study_1727137200000_test003"}
+{"userId":"student1","date":"2025-09-24","contentType":"vocabulary","partNumber":5,"durationMinutes":15,"completed":true,"id":"study_1727138700000_test004"}
+{"userId":"student1","date":"2025-09-25","contentType":"shadowing","partNumber":3,"durationMinutes":30,"completed":true,"id":"study_1727223600000_test005"}
+{"userId":"student1","date":"2025-09-25","contentType":"practice","partNumber":7,"durationMinutes":40,"completed":true,"questionCount":15,"correctCount":11,"id":"study_1727225400000_test006"}
+{"userId":"student1","date":"2025-09-26","contentType":"practice","partNumber":2,"durationMinutes":25,"completed":true,"questionCount":25,"correctCount":21,"id":"study_1727309700000_test007"}
+{"userId":"student1","date":"2025-09-26","contentType":"practice","partNumber":7,"durationMinutes":20,"completed":true,"questionCount":10,"correctCount":8,"id":"study_1727311200000_test008"}

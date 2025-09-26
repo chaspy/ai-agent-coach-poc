@@ -7,6 +7,8 @@ import { readProfile, writeProfile, readRecentHistory, writeHistory, ensureDataD
 import { searchMemories, getMemoryStats, deleteMemory } from './memory-storage';
 import { analyzeStudyPatterns, generatePraiseVariations, generateStudySuggestions } from './memory-analyzer';
 import { thinkingLogStore, ThinkingLogger } from './thinking-log';
+import { saveStudyRecord, getStudyRecords, calculateStudyStats } from './study-record-storage';
+import type { StudyContentType } from './study-record-types';
 // 🚨 CRITICAL: AI SDK v5ブロッカー対応 (2025-09-05)
 // ストリーミング機能でUnsupportedModelVersionError発生
 // OpenAI gpt-4o-mini model spec v1 vs AI SDK v5要求 spec v2不整合
@@ -276,6 +278,59 @@ app.post('/agent/ask-stream', async (req, res) => {
 
     // ユーザーのメッセージを履歴に保存
     writeHistory(threadId, role, message);
+
+    // 🚨 学習報告の自動検出と保存
+    if (role === 'student') {
+      const lowerMsg = message.toLowerCase();
+      const partMatch = lowerMsg.match(/part\s*(\d)/);
+      const timeMatch = lowerMsg.match(/(\d+)\s*分/);
+      
+      // 学習報告のキーワード検出
+      const isStudyReport = (
+        partMatch || 
+        lowerMsg.includes('練習') || 
+        lowerMsg.includes('勉強') ||
+        lowerMsg.includes('やった') ||
+        lowerMsg.includes('やりました') ||
+        lowerMsg.includes('ディクテーション') ||
+        lowerMsg.includes('シャドーイング') ||
+        lowerMsg.includes('模試')
+      );
+      
+      if (isStudyReport && timeMatch) {
+        const partNumber = partMatch ? parseInt(partMatch[1]) : undefined;
+        const durationMinutes = parseInt(timeMatch[1]);
+        
+        // contentTypeの推定
+        let contentType: 'basics' | 'dictation' | 'shadowing' | 'practice' | 'vocabulary' | 'mock_test' = 'practice';
+        if (lowerMsg.includes('ディクテーション')) contentType = 'dictation';
+        else if (lowerMsg.includes('シャドーイング')) contentType = 'shadowing';
+        else if (lowerMsg.includes('模試') || lowerMsg.includes('本番')) contentType = 'mock_test';
+        else if (lowerMsg.includes('単語') || lowerMsg.includes('語彙')) contentType = 'vocabulary';
+        else if (lowerMsg.includes('基礎') || lowerMsg.includes('講義')) contentType = 'basics';
+        
+        try {
+          const today = new Date().toISOString().split('T')[0];
+          const studyRecord = saveStudyRecord({
+            userId: profileIds.self,
+            date: today,
+            contentType,
+            partNumber: partNumber && partNumber >= 1 && partNumber <= 7 ? partNumber as (1|2|3|4|5|6|7) : undefined,
+            durationMinutes,
+            completed: true,
+          });
+          
+          logger.info({ 
+            recordId: studyRecord.id, 
+            contentType, 
+            partNumber, 
+            durationMinutes 
+          }, '🎯 学習記録を自動保存');
+        } catch (error) {
+          logger.error({ error }, '学習記録の自動保存に失敗');
+        }
+      }
+    }
 
     // 履歴情報の取得
     const history = readRecentHistory(threadId, 8);
@@ -624,6 +679,78 @@ app.delete('/agent/memories/:userId/:memoryId', (req, res) => {
   }
 });
 
+// 学習記録保存エンドポイント
+app.post('/agent/study-records', (req, res) => {
+  const { userId, date, contentType, partNumber, durationMinutes, questionCount, correctCount, score, notes } = req.body;
+  
+  if (!userId || !date || !contentType || !durationMinutes) {
+    return res.status(400).json({ error: 'userId, date, contentType, durationMinutes are required' });
+  }
+  
+  try {
+    const record = saveStudyRecord({
+      userId,
+      date,
+      contentType,
+      partNumber,
+      durationMinutes,
+      questionCount,
+      correctCount,
+      score,
+      notes,
+      completed: true,
+    });
+    
+    logger.info({ userId, recordId: record.id, contentType, durationMinutes }, 'Study record saved');
+    return res.json(record);
+  } catch (e: any) {
+    logger.error({ err: e, userId }, 'Failed to save study record');
+    return res.status(500).json({ error: e?.message || 'Failed to save study record' });
+  }
+});
+
+// 学習記録取得エンドポイント
+app.get('/agent/study-records/:userId', (req, res) => {
+  const { userId } = req.params;
+  const { fromDate, toDate, contentType, partNumber, limit } = req.query;
+  
+  try {
+    const records = getStudyRecords(userId, {
+      fromDate: fromDate as string,
+      toDate: toDate as string,
+      contentType: contentType as StudyContentType,
+      partNumber: partNumber ? parseInt(partNumber as string) : undefined,
+      limit: limit ? parseInt(limit as string) : undefined,
+    });
+    
+    logger.info({ userId, count: records.length }, 'Study records retrieved');
+    return res.json({ records });
+  } catch (e: any) {
+    logger.error({ err: e, userId }, 'Failed to fetch study records');
+    return res.status(500).json({ error: e?.message || 'Failed to fetch study records' });
+  }
+});
+
+// 学習統計取得エンドポイント
+app.get('/agent/study-stats/:userId', (req, res) => {
+  const { userId } = req.params;
+  
+  try {
+    const stats = calculateStudyStats(userId);
+    
+    logger.info({ 
+      userId, 
+      totalMinutes: stats.totalStudyTimeMinutes,
+      consecutiveDays: stats.consecutiveDays 
+    }, 'Study stats calculated');
+    
+    return res.json(stats);
+  } catch (e: any) {
+    logger.error({ err: e, userId }, 'Failed to calculate study stats');
+    return res.status(500).json({ error: e?.message || 'Failed to calculate study stats' });
+  }
+});
+
 // コーチ声掛けメッセージ生成エンドポイント
 app.post('/agent/coach-prompt', async (req, res) => {
   const { threadId, studentId, coachId, messageType } = req.body as CoachPromptInput;
@@ -651,6 +778,12 @@ app.post('/agent/coach-prompt', async (req, res) => {
       notExpired: true,
     });
     thinkingLogger.info('メモリー取得完了', `${memories.length}件の学習記録を取得`);
+
+    // 学習統計を取得（新システム）
+    thinkingLogger.debug('学習統計取得', `生徒ID: ${studentId} の学習統計を計算中`);
+    const studyStats = calculateStudyStats(studentId);
+    thinkingLogger.success('学習統計取得完了', `累計${studyStats.totalStudyTimeMinutes}分、連続${studyStats.consecutiveDays}日`);
+    logger.debug({ studyStats }, '学習統計取得完了');
 
     // 学習パターンを分析
     thinkingLogger.debug('パターン分析開始', '連続学習日数、学習時間、タスク進捗を計算中');
@@ -688,8 +821,11 @@ app.post('/agent/coach-prompt', async (req, res) => {
 ${historyContext}
 
 【学習状況】
-- 連続学習日数: ${pattern.consecutiveDays}日
-- 総学習時間: ${Math.round(pattern.totalStudyHours)}時間
+- 連続学習日数: ${studyStats.consecutiveDays}日
+- 累計学習時間: ${Math.floor(studyStats.totalStudyTimeMinutes / 60)}時間${studyStats.totalStudyTimeMinutes % 60}分
+- 今週の学習時間: ${studyStats.thisWeek.totalMinutes}分（${studyStats.thisWeek.sessions}セッション）
+- Part別学習状況: ${studyStats.byPart.filter(p => p.totalMinutes > 0).map(p => `Part${p.partNumber}:${p.totalMinutes}分`).join(', ') || 'なし'}
+- 学習内容: ${studyStats.byContentType.filter(c => c.totalMinutes > 0).map(c => `${c.contentType}:${c.totalMinutes}分`).join(', ') || 'なし'}
 - 最近の学習科目: ${pattern.recentSubjects.join(', ') || 'なし'}
 
 【指示】コーチから声掛けするメッセージです。まず自然な挨拶から始めて、生徒の調子を聞いてから、今日の学習提案につなげてください。
@@ -729,8 +865,11 @@ ${historyContext}
 ${historyContext}
 
 【進捗状況】
+- 連続学習日数: ${studyStats.consecutiveDays}日
+- 今週の学習: ${studyStats.thisWeek.totalMinutes}分（${studyStats.thisWeek.sessions}セッション）
 - タスク完了率: ${pattern.totalTasks > 0 ? Math.round((pattern.completedTasks / pattern.totalTasks) * 100) : 0}%
 - 克服した課題: ${pattern.challengesOvercome.join(', ') || 'なし'}
+- Part別進捗: ${studyStats.byPart.filter(p => p.totalMinutes > 0).map(p => `Part${p.partNumber}:${p.totalMinutes}分${p.averageAccuracy ? `(正答率${Math.round(p.averageAccuracy * 100)}%)` : ''}`).join(', ') || 'なし'}
 
 【指示】コーチから声掛けするメッセージです。まず挨拶と生徒の近況を聞いてから、TOEIC試験に向けた進捗確認につなげてください。
 
@@ -767,7 +906,9 @@ ${historyContext}
 ${historyContext}
 
 【褒めポイント】
-- 1日2時間の学習時間を確保している
+- 連続${studyStats.consecutiveDays}日も学習を継続している
+- 累計${Math.floor(studyStats.totalStudyTimeMinutes / 60)}時間以上の学習時間を確保
+- 今週は${studyStats.thisWeek.totalMinutes}分学習（${studyStats.thisWeek.sessions}セッション）
 - 明確な目標設定ができている
 ${praiseMessages.slice(0, 1).join('\n')}
 

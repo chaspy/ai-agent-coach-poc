@@ -206,3 +206,61 @@ export const validateTaskPlan = (data: unknown): TaskPlan => {
 export const validateAnswerEvaluation = (data: unknown): AnswerEvaluation => {
   return AnswerEvaluationSchema.parse(data);
 };
+
+// ------------------------------
+// 学習記録用スキーマ
+// ------------------------------
+
+// 学習記録スキーマ
+export const StudyRecordSchema = z.object({
+  id: z.string().describe('学習記録ID'),
+  userId: z.string().describe('ユーザーID'),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).describe('学習日（YYYY-MM-DD形式）'),
+  contentType: z.enum(['basics', 'dictation', 'shadowing', 'practice', 'vocabulary', 'mock_test']).describe('コンテンツタイプ'),
+  partNumber: z.number().int().min(1).max(7).optional().describe('TOEIC Part番号（1-7）'),
+  durationMinutes: z.number().int().min(0).describe('学習時間（分）'),
+  questionCount: z.number().int().min(0).optional().describe('問題数'),
+  correctCount: z.number().int().min(0).optional().describe('正答数'),
+  score: z.number().optional().describe('スコア'),
+  notes: z.string().optional().describe('メモ'),
+  completed: z.boolean().describe('完了フラグ'),
+});
+
+export type StudyRecord = z.infer<typeof StudyRecordSchema>;
+
+// 学習統計スキーマ
+export const StudyStatsSchema = z.object({
+  userId: z.string().describe('ユーザーID'),
+  totalStudyTimeMinutes: z.number().min(0).describe('累計学習時間（分）'),
+  consecutiveDays: z.number().int().min(0).describe('連続学習日数'),
+  lastStudyDate: z.string().optional().describe('最終学習日'),
+  byPart: z.array(z.object({
+    partNumber: z.number().int().min(1).max(7),
+    totalMinutes: z.number().min(0),
+    sessions: z.number().int().min(0),
+    averageAccuracy: z.number().min(0).max(1).optional(),
+  })).describe('Part別統計'),
+  byContentType: z.array(z.object({
+    contentType: z.string(),
+    totalMinutes: z.number().min(0),
+    sessions: z.number().int().min(0),
+  })).describe('コンテンツタイプ別統計'),
+  thisWeek: z.object({
+    totalMinutes: z.number().min(0),
+    sessions: z.number().int().min(0),
+    byDay: z.array(z.object({
+      date: z.string(),
+      minutes: z.number().min(0),
+    })),
+  }).describe('今週の統計'),
+});
+
+export type StudyStats = z.infer<typeof StudyStatsSchema>;
+
+export const validateStudyRecord = (data: unknown): StudyRecord => {
+  return StudyRecordSchema.parse(data);
+};
+
+export const validateStudyStats = (data: unknown): StudyStats => {
+  return StudyStatsSchema.parse(data);
+};
